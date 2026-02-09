@@ -25,42 +25,79 @@ const LOCATIONS = ['Lednice', 'Mrazák', 'Spíž']
 const UNITS = ['ks', 'g', 'kg', 'ml', 'l']
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || 'AIzaSyCYnLRNdA8C3Krr2F0QyuaqPo1H2tHvlRY'
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function callGeminiForImage(imageBase64, retries = 3) {
+function getGeminiUrl(model) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`
+}
+
+async function callGeminiForImage(imageBase64, mimeType = 'image/jpeg', retries = 2) {
   const prompt = `Analyzuj tuto fotku potravin nebo zásob (lednice, nákup). Vrať POUZE validní JSON pole objektů bez markdown a bez dalšího textu.
 Každý objekt musí mít přesně: name (název v češtině), amount (číslo), unit (jedna z: ks, g, kg, ml, l), category (přesně jedna z: Chlazené, Pečivo, Zelenina & Ovoce, Maso, Ostatní).
 Příklad: [{"name":"Mléko","amount":500,"unit":"ml","category":"Chlazené"},{"name":"Chléb","amount":1,"unit":"ks","category":"Pečivo"}]`
 
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch(GEMINI_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { text: prompt },
-              { inline_data: { mime_type: 'image/jpeg', data: imageBase64 } }
-            ]
-          }]
+  if (!GEMINI_API_KEY || GEMINI_API_KEY === 'your-gemini-api-key') {
+    throw new Error('Není nastaven API klíč pro Gemini. Přidejte VITE_GEMINI_API_KEY do nastavení Vercel.')
+  }
+
+  const payload = {
+    contents: [{
+      parts: [
+        { text: prompt },
+        { inline_data: { mime_type: mimeType || 'image/jpeg', data: imageBase64 } }
+      ]
+    }]
+  }
+
+  let lastError = null
+  for (const model of GEMINI_MODELS) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const url = getGeminiUrl(model)
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         })
-      })
-      if (!res.ok) throw new Error(`API ${res.status}`)
-      const data = await res.json()
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text
-      if (!text) throw new Error('Prázdná odpověď')
-      const match = text.match(/\[[\s\S]*\]/)
-      const parsed = match ? JSON.parse(match[0]) : []
-      return Array.isArray(parsed) ? parsed : []
-    } catch (e) {
-      console.warn(`Gemini pokus ${i + 1}`, e)
-      if (i < retries - 1) await delay(2 ** i * 1000)
-      else throw e
+        const data = await res.json()
+
+        if (!res.ok) {
+          const msg = data?.error?.message || `HTTP ${res.status}`
+          throw new Error(msg)
+        }
+
+        if (data.error) {
+          throw new Error(data.error.message || 'Chyba API')
+        }
+
+        const candidate = data.candidates?.[0]
+        if (!candidate) {
+          const blockReason = data.promptFeedback?.blockReason || 'Žádná odpověď'
+          throw new Error(blockReason)
+        }
+        if (candidate.finishReason && candidate.finishReason !== 'STOP' && candidate.finishReason !== 'MAX_TOKENS') {
+          throw new Error(candidate.finishReason)
+        }
+
+        const text = candidate.content?.parts?.[0]?.text
+        if (!text || typeof text !== 'string') {
+          throw new Error('Prázdná odpověď od modelu')
+        }
+
+        const match = text.match(/\[[\s\S]*\]/)
+        const parsed = match ? JSON.parse(match[0]) : []
+        return Array.isArray(parsed) ? parsed : []
+      } catch (e) {
+        lastError = e
+        console.warn(`Gemini ${model} pokus ${i + 1}:`, e.message || e)
+        if (i < retries - 1) await delay(1000 * (i + 1))
+      }
     }
   }
+
+  throw lastError || new Error('Analýza fotky selhala')
 }
 
 export default function App() {
@@ -169,19 +206,28 @@ export default function App() {
   const handlePhoto = (e) => {
     const file = e.target.files?.[0]
     if (!file) return
+    const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
     setAiLoading(true)
     const reader = new FileReader()
     reader.onloadend = async () => {
       try {
-        const base64 = reader.result.split(',')[1]
-        const list = await callGeminiForImage(base64)
+        const dataUrl = reader.result
+        const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+        if (!base64) throw new Error('Nepodařilo se načíst obrázek')
+        const list = await callGeminiForImage(base64, mimeType)
         setReviewItems(list.length ? list : [{ name: 'Neznámý', amount: 1, unit: 'ks', category: 'Ostatní' }])
         setShowReviewModal(true)
       } catch (err) {
-        alert('Analýza fotky selhala. Zkuste to znovu.')
+        const message = err?.message || 'Neznámá chyba'
+        console.error('AI analýza fotky:', message)
+        alert(`Analýza fotky selhala. Zkuste to znovu.\n\nDetail: ${message}`)
       } finally {
         setAiLoading(false)
       }
+    }
+    reader.onerror = () => {
+      setAiLoading(false)
+      alert('Nepodařilo se načíst soubor.')
     }
     reader.readAsDataURL(file)
   }
