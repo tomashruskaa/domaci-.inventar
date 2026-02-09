@@ -25,7 +25,8 @@ const LOCATIONS = ['Lednice', 'Mrazák', 'Spíž']
 const UNITS = ['ks', 'g', 'kg', 'ml', 'l']
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || 'AIzaSyCYnLRNdA8C3Krr2F0QyuaqPo1H2tHvlRY'
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+// Modely s podporou obrázků; 2.0-flash má na free tier často vyčerpanou kvótu
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash']
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -91,8 +92,15 @@ Příklad: [{"name":"Mléko","amount":500,"unit":"ml","category":"Chlazené"},{"
         return Array.isArray(parsed) ? parsed : []
       } catch (e) {
         lastError = e
-        console.warn(`Gemini ${model} pokus ${i + 1}:`, e.message || e)
-        if (i < retries - 1) await delay(1000 * (i + 1))
+        const msg = e?.message || ''
+        const is429 = msg.includes('quota') || msg.includes('429') || msg.includes('Too Many')
+        console.warn(`Gemini ${model} pokus ${i + 1}:`, msg)
+        if (is429 && i < retries - 1) {
+          const wait = 5000
+          await delay(wait)
+        } else if (i < retries - 1) {
+          await delay(1000 * (i + 1))
+        }
       }
     }
   }
@@ -220,7 +228,11 @@ export default function App() {
       } catch (err) {
         const message = err?.message || 'Neznámá chyba'
         console.error('AI analýza fotky:', message)
-        alert(`Analýza fotky selhala. Zkuste to znovu.\n\nDetail: ${message}`)
+        const isQuota = message.includes('quota') || message.includes('429') || message.includes('Too Many')
+        const userMsg = isQuota
+          ? 'Kvóta Gemini API je vyčerpaná. Zkuste to za minutu nebo zkontrolujte kvótu na https://aistudio.google.com'
+          : `Analýza fotky selhala. Zkuste to znovu.\n\nDetail: ${message}`
+        alert(userMsg)
       } finally {
         setAiLoading(false)
       }
