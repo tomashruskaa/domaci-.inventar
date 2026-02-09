@@ -4,10 +4,10 @@ PWA aplikace pro správu domácích zásob s AI skenováním pomocí Google Gemi
 
 ## Funkce
 
-- 📊 **Dashboard** - Přehled expirujících a prošlých položek
-- 📦 **Inventář** - Správa zásob podle lokací (Lednice, Mrazák, Spíž, Koupelna)
-- 🛒 **Nákupní seznam** - Seznam s automatickým přidáváním do inventáře
-- 🤖 **AI Skenování** - Analýza fotek pomocí Google Gemini API
+- 🛒 **Nákupní seznam** - Správa nákupů s kategoriemi (Chlazené, Pečivo, Zelenina & Ovoce, Maso, Ostatní), checkbox pro odškrtnutí a sekce "Koupeno"
+- 📦 **Co mám doma** - Zásoby podle lokací (Lednice, Mrazák, Spíž), AI skenování, abecední řazení, inline editace, přesun do nákupního seznamu
+- 📊 **Statistiky** - Přehled měsíční útraty s koláčovým grafem
+- 🤖 **AI Skenování** - Analýza fotek pomocí Google Gemini API (pouze v sekci Inventář)
 
 ## Instalace
 
@@ -68,25 +68,31 @@ Ikony můžete vygenerovat pomocí nástrojů jako [PWA Asset Generator](https:/
 ## Struktura dat Firestore
 
 ### Kolekce: `items`
+Jedna kolekce pro všechny položky. Pole: `name`, `amount`, `unit`, `category`, `status`, `location`, `isBought`, `appId`.
+
+**Položka v nákupním seznamu** (`status: 'shopping'`):
 ```javascript
 {
-  appId: 'moje-spiz-lednice-v1',
-  name: 'Mléko',
-  quantity: 500,
-  unit: 'ml',
-  location: 'Lednice',
-  expiryDate: Timestamp, // volitelné
-  createdAt: Timestamp
+  appId: 'domaci-inventar-v1',
+  name: 'Chléb',
+  amount: 1,
+  unit: 'ks',
+  category: 'Pečivo', // Chlazené, Pečivo, Zelenina & Ovoce, Maso, Ostatní
+  status: 'shopping',
+  isBought: false
 }
 ```
 
-### Kolekce: `shoppingList`
+**Položka doma** (`status: 'home'`):
 ```javascript
 {
-  appId: 'moje-spiz-lednice-v1',
-  name: 'Chléb',
-  completed: false,
-  createdAt: Timestamp
+  appId: 'domaci-inventar-v1',
+  name: 'Mléko',
+  amount: 500,
+  unit: 'ml',
+  category: 'Chlazené',
+  status: 'home',
+  location: 'Lednice'  // Lednice, Mrazák, Spíž
 }
 ```
 
