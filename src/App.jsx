@@ -24,6 +24,7 @@ import {
   ChevronRight,
   Image,
   Loader2,
+  Pencil,
   PieChart,
   Plus,
   Receipt,
@@ -387,6 +388,12 @@ export default function App() {
   const [recipesLoading, setRecipesLoading] = useState(false)
   const [recipes, setRecipes] = useState([])
 
+  const [editOpen, setEditOpen] = useState(false)
+  const [editTarget, setEditTarget] = useState(null)
+  const [editName, setEditName] = useState('')
+  const [editAmount, setEditAmount] = useState(0)
+  const [editUnit, setEditUnit] = useState('ks')
+
   const inputReceiptRef = useRef(null)
   const inputFridgeRef = useRef(null)
   const inputGalleryRef = useRef(null)
@@ -412,14 +419,12 @@ export default function App() {
     return () => unsub()
   }, [])
 
-  // Items subscription
+  // Items subscription - sdílená kolekce (bez filtru podle uživatele / appId)
   useEffect(() => {
     if (!user) return
     setItemsLoading(true)
     const q = query(
       collection(db, 'items'),
-      where('appId', '==', APP_ID),
-      where('uid', '==', user.uid),
       orderBy('createdAt', 'desc')
     )
     const unsub = onSnapshot(
@@ -436,14 +441,12 @@ export default function App() {
     return () => unsub()
   }, [user])
 
-  // Expenses subscription (pro Přehled + ruční výdaje)
+  // Expenses subscription (pro Přehled + ruční výdaje) – také sdílené
   useEffect(() => {
     if (!user) return
     setExpensesLoading(true)
     const q = query(
       collection(db, 'expenses'),
-      where('appId', '==', APP_ID),
-      where('uid', '==', user.uid),
       orderBy('createdAt', 'desc')
     )
     const unsub = onSnapshot(
@@ -506,8 +509,6 @@ export default function App() {
     const safeEmoji = emoji || await geminiEmojiForItem({ name, category: safeCategory })
 
     return addDoc(collection(db, 'items'), {
-      appId: APP_ID,
-      uid: user.uid,
       name: (name || 'Položka').toString().trim(),
       amount: clampNumber(amount ?? 1, 0, 9999),
       unit: safeUnit,
@@ -528,6 +529,30 @@ export default function App() {
 
   async function deleteItem(id) {
     await deleteDoc(doc(db, 'items', id))
+  }
+
+  function startEdit(item) {
+    if (!item) return
+    setEditTarget(item)
+    setEditName(item.name || '')
+    setEditAmount(item.amount ?? 0)
+    setEditUnit(isValidUnit(item.unit) ? item.unit : 'ks')
+    setEditOpen(true)
+  }
+
+  async function saveEdit() {
+    if (!editTarget) return
+    try {
+      const name = editName.trim() || editTarget.name || 'Položka'
+      const amount = clampNumber(editAmount ?? 0, 0, 9999)
+      const unit = isValidUnit(editUnit) ? editUnit : 'ks'
+      await updateItem(editTarget.id, { name, amount, unit })
+      setEditOpen(false)
+      setEditTarget(null)
+    } catch (e) {
+      console.error(e)
+      alert('Nepodařilo se uložit změny položky.')
+    }
   }
 
   // -----------------------------
@@ -733,6 +758,7 @@ export default function App() {
             onToggleBought={toggleBought}
             onDelete={(id) => deleteItem(id).catch(() => alert('Nepodařilo se smazat položku.'))}
             onMoveBought={() => setMoveBoughtOpen(true)}
+            onEdit={startEdit}
           />
         ) : null}
 
@@ -743,6 +769,7 @@ export default function App() {
             onAddToCart={(item) => updateItem(item.id, { status: 'shopping', isBought: false }).catch(() => alert('Nepodařilo se přidat do nákupního seznamu.'))}
             onDelete={(id) => deleteItem(id).catch(() => alert('Nepodařilo se smazat položku.'))}
             onSuggestRecipes={handleSuggestRecipes}
+            onEdit={startEdit}
           />
         ) : null}
 
@@ -750,14 +777,11 @@ export default function App() {
           <OverviewTab
             expenses={expenses}
             onAddExpense={async ({ label, amountCzk }) => {
-              if (!user) return
               const name = (label || '').toString().trim()
               const amount = clampNumber(amountCzk, 0, 1_000_000)
               if (!name || !amount) return
               try {
                 await addDoc(collection(db, 'expenses'), {
-                  appId: APP_ID,
-                  uid: user.uid,
                   label: name,
                   amountCzk: amount,
                   createdAt: serverTimestamp()
@@ -950,6 +974,69 @@ export default function App() {
                 Žádné položky k uložení.
               </div>
             ) : null}
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Edit modal */}
+      {editOpen ? (
+        <Modal
+          title="Upravit položku"
+          onClose={() => {
+            setEditOpen(false)
+            setEditTarget(null)
+          }}
+          footer={(
+            <div className="flex gap-3">
+              <Button
+                variant="secondary"
+                className="flex-1"
+                onClick={() => {
+                  setEditOpen(false)
+                  setEditTarget(null)
+                }}
+              >
+                Zrušit
+              </Button>
+              <Button className="flex-1" onClick={saveEdit}>
+                Uložit změny
+              </Button>
+            </div>
+          )}
+        >
+          <div className="space-y-3">
+            <div>
+              <div className="text-xs text-slate-500 mb-1">Název</div>
+              <Input
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="Název položky"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <div className="text-xs text-slate-500 mb-1">Množství</div>
+                <Input
+                  type="number"
+                  min="0"
+                  value={editAmount}
+                  onChange={(e) => setEditAmount(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 mb-1">Jednotka</div>
+                <Select
+                  value={editUnit}
+                  onChange={(e) => setEditUnit(e.target.value)}
+                >
+                  {UNITS.map((u) => (
+                    <option key={u} value={u}>
+                      {u}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </div>
           </div>
         </Modal>
       ) : null}
@@ -1159,7 +1246,7 @@ function AiOverlay({ status, progress }) {
   )
 }
 
-function ShoppingTab({ categories, shoppingByCategory, boughtItems, onAdd, onToggleBought, onDelete, onMoveBought }) {
+function ShoppingTab({ categories, shoppingByCategory, boughtItems, onAdd, onToggleBought, onDelete, onMoveBought, onEdit }) {
   const [showForm, setShowForm] = useState(false)
   const [name, setName] = useState('')
   const [amount, setAmount] = useState(1)
@@ -1254,6 +1341,14 @@ function ShoppingTab({ categories, shoppingByCategory, boughtItems, onAdd, onTog
                   </div>
                   <button
                     type="button"
+                    onClick={() => onEdit?.(it)}
+                    className="p-2 rounded-xl text-slate-400 hover:text-slate-100 hover:bg-slate-800/60"
+                    title="Upravit"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => onDelete(it.id)}
                     className="p-2 rounded-xl text-slate-400 hover:text-red-300 hover:bg-red-500/10"
                     title="Smazat"
@@ -1297,6 +1392,14 @@ function ShoppingTab({ categories, shoppingByCategory, boughtItems, onAdd, onTog
                 </div>
                 <button
                   type="button"
+                  onClick={() => onEdit?.(it)}
+                  className="p-2 rounded-xl text-slate-500 hover:text-slate-100 hover:bg-slate-800/60"
+                  title="Upravit"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
                   onClick={() => onDelete(it.id)}
                   className="p-2 rounded-xl text-slate-500 hover:text-red-300 hover:bg-red-500/10"
                   title="Smazat"
@@ -1318,7 +1421,7 @@ function ShoppingTab({ categories, shoppingByCategory, boughtItems, onAdd, onTog
   )
 }
 
-function InventoryTab({ locations, homeByLocation, onAddToCart, onDelete, onSuggestRecipes }) {
+function InventoryTab({ locations, homeByLocation, onAddToCart, onDelete, onSuggestRecipes, onEdit }) {
   const [loc, setLoc] = useState('Lednice')
   const list = homeByLocation.get(loc) || []
 
@@ -1358,7 +1461,7 @@ function InventoryTab({ locations, homeByLocation, onAddToCart, onDelete, onSugg
         {list.length ? (
           <ul className="space-y-2">
             {list.map((it) => (
-              <InventoryRow key={it.id} item={it} onAddToCart={onAddToCart} onDelete={onDelete} />
+              <InventoryRow key={it.id} item={it} onAddToCart={onAddToCart} onDelete={onDelete} onEdit={onEdit} />
             ))}
           </ul>
         ) : (
@@ -1371,7 +1474,7 @@ function InventoryTab({ locations, homeByLocation, onAddToCart, onDelete, onSugg
   )
 }
 
-function InventoryRow({ item, onAddToCart, onDelete }) {
+function InventoryRow({ item, onAddToCart, onDelete, onEdit }) {
   const expiry = toDateMaybe(item.expiryDate)
   const now = new Date()
   const daysLeft = expiry ? daysBetween(now, expiry) : null
@@ -1399,6 +1502,15 @@ function InventoryRow({ item, onAddToCart, onDelete }) {
           ) : null}
         </div>
       </div>
+
+      <button
+        type="button"
+        onClick={() => onEdit?.(item)}
+        className="p-2 rounded-xl text-slate-400 hover:text-slate-100 hover:bg-slate-800/60"
+        title="Upravit"
+      >
+        <Pencil className="w-4 h-4" />
+      </button>
 
       <button
         type="button"
