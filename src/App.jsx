@@ -537,8 +537,11 @@ export default function App() {
     setEditName(item.name || '')
     setEditAmount(item.amount ?? 0)
     setEditUnit(isValidUnit(item.unit) ? item.unit : 'ks')
+    setEditExpiry(item.expiryDate || '')
     setEditOpen(true)
   }
+
+  const [editExpiry, setEditExpiry] = useState('');
 
   async function saveEdit() {
     if (!editTarget) return
@@ -546,7 +549,18 @@ export default function App() {
       const name = editName.trim() || editTarget.name || 'Položka'
       const amount = clampNumber(editAmount ?? 0, 0, 9999)
       const unit = isValidUnit(editUnit) ? editUnit : 'ks'
-      await updateItem(editTarget.id, { name, amount, unit })
+      
+      // Přidáme hodnotu ze state editExpiry
+      const expiryDate = editExpiry || null 
+  
+      // Do updateItem pošleme i expiryDate
+      await updateItem(editTarget.id, { 
+        name, 
+        amount, 
+        unit, 
+        expiryDate 
+      })
+  
       setEditOpen(false)
       setEditTarget(null)
     } catch (e) {
@@ -978,68 +992,80 @@ export default function App() {
         </Modal>
       ) : null}
 
-      {/* Edit modal */}
-      {editOpen ? (
-        <Modal
-          title="Upravit položku"
-          onClose={() => {
+     {/* Edit modal */}
+{editOpen ? (
+  <Modal
+    title="Upravit položku"
+    onClose={() => {
+      setEditOpen(false)
+      setEditTarget(null)
+    }}
+    footer={(
+      <div className="flex gap-3">
+        <Button
+          variant="secondary"
+          className="flex-1"
+          onClick={() => {
             setEditOpen(false)
             setEditTarget(null)
           }}
-          footer={(
-            <div className="flex gap-3">
-              <Button
-                variant="secondary"
-                className="flex-1"
-                onClick={() => {
-                  setEditOpen(false)
-                  setEditTarget(null)
-                }}
-              >
-                Zrušit
-              </Button>
-              <Button className="flex-1" onClick={saveEdit}>
-                Uložit změny
-              </Button>
-            </div>
-          )}
         >
-          <div className="space-y-3">
-            <div>
-              <div className="text-xs text-slate-500 mb-1">Název</div>
-              <Input
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                placeholder="Název položky"
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-xs text-slate-500 mb-1">Množství</div>
-                <Input
-                  type="number"
-                  min="0"
-                  value={editAmount}
-                  onChange={(e) => setEditAmount(Number(e.target.value) || 0)}
-                />
-              </div>
-              <div>
-                <div className="text-xs text-slate-500 mb-1">Jednotka</div>
-                <Select
-                  value={editUnit}
-                  onChange={(e) => setEditUnit(e.target.value)}
-                >
-                  {UNITS.map((u) => (
-                    <option key={u} value={u}>
-                      {u}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-            </div>
-          </div>
-        </Modal>
-      ) : null}
+          Zrušit
+        </Button>
+        <Button className="flex-1" onClick={saveEdit}>
+          Uložit změny
+        </Button>
+      </div>
+    )}
+  >
+    <div className="space-y-3">
+      <div>
+        <div className="text-xs text-slate-500 mb-1">Název</div>
+        <Input
+          value={editName}
+          onChange={(e) => setEditName(e.target.value)}
+          placeholder="Název položky"
+        />
+      </div>
+      
+      {/* --- PŘIDÁNO: DATUM EXPIRACE --- */}
+      <div>
+        <div className="text-xs text-slate-500 mb-1">Datum expirace</div>
+        <Input
+          type="date"
+          value={editExpiry}
+          onChange={(e) => setEditExpiry(e.target.value)}
+        />
+      </div>
+      {/* ------------------------------- */}
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-xs text-slate-500 mb-1">Množství</div>
+          <Input
+            type="number"
+            min="0"
+            value={editAmount}
+            onChange={(e) => setEditAmount(Number(e.target.value) || 0)}
+          />
+        </div>
+        <div>
+          <div className="text-xs text-slate-500 mb-1">Jednotka</div>
+          <Select
+            value={editUnit}
+            onChange={(e) => setEditUnit(e.target.value)}
+          >
+            {UNITS.map((u) => (
+              <option key={u} value={u}>
+                {u}
+              </option>
+            ))}
+          </Select>
+        </div>
+      </div>
+    </div>
+  </Modal>
+) : null}
 
       {/* Recepty */}
       {recipesOpen ? (
@@ -1496,11 +1522,13 @@ function InventoryRow({ item, onAddToCart, onDelete, onEdit }) {
           ) : null}
         </div>
         <div className="text-xs text-slate-400 mt-0.5">
-          {item.amount} {item.unit}
-          {expiry ? (
-            <span className="text-slate-500"> · do {expiry.toLocaleDateString('cs-CZ')}</span>
-          ) : null}
-        </div>
+  {item.amount} {item.unit}
+  {item.expiryDate && (
+    <span className="text-slate-500">
+      {' · '} do {new Date(item.expiryDate).toLocaleDateString('cs-CZ')}
+    </span>
+  )}
+</div>
       </div>
 
       <button
