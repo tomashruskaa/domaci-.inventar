@@ -395,7 +395,10 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
 
   return (
     <div className="max-w-2xl mx-auto space-y-6">
-      <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Nákupní seznam</h1>
+      <h1 className="text-2xl md:text-3xl font-bold text-gray-900 flex items-center gap-2">
+        <span aria-hidden="true" className="text-[1.1em] leading-none">🛒</span>
+        <span>Nákupní seznam</span>
+      </h1>
 
       {!showForm ? (
         <button
@@ -493,7 +496,7 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
       )}
 
       {shoppingByCategory.every((s) => s.items.length === 0) && boughtItems.length === 0 && (
-        <p className="text-center text-gray-500 py-8">Nákupní seznam je prázdný.</p>
+        <p className="text-center text-gray-500 py-8">🛒 Nákupní seznam je prázdný.</p>
       )}
     </div>
   )
