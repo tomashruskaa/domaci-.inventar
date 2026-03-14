@@ -16,12 +16,11 @@ PWA aplikace pro správu domácích zásob s AI skenováním pomocí Google Gemi
 npm install
 ```
 
-2. Vytvořte soubor `.env` v kořenovém adresáři (nebo zkopírujte `.env.example`):
+2. Vytvořte lokální soubor s proměnnými prostředí (**necommitujte ho**):
 ```bash
-cp .env.example .env
+cp .env.example .env.local
 ```
-
-Aplikace má výchozí hodnoty v kódu, takže bude fungovat i bez `.env` souboru. Pro produkci však doporučuji použít `.env` soubor s vašimi hodnotami.
+Otevřete `.env.local` a nahraďte všechny `YOUR_VALUE_HERE` skutečnými hodnotami z Firebase a Google AI Studio. Soubor `.env.local` je v `.gitignore` a nesmí být nikdy pushnut do repozitáře. Pro produkci nastavte proměnné v Vercel (viz níže).
 
 3. Spusťte vývojový server:
 ```bash
@@ -33,12 +32,12 @@ npm run dev
 1. Vytvořte nový projekt na [Firebase Console](https://console.firebase.google.com/)
 2. Povolte **Anonymous Authentication** v Authentication > Sign-in method
 3. Vytvořte Firestore databázi v režimu testování
-4. Zkopírujte konfigurační hodnoty do `.env` souboru
+4. Zkopírujte konfigurační hodnoty do `.env.local` (ne do `.env.example`)
 
 ## Nastavení Google Gemini API
 
 1. Získejte API klíč z [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Přidejte klíč do `.env` souboru jako `VITE_GEMINI_API_KEY`
+2. Přidejte klíč do `.env.local` jako `VITE_GEMINI_API_KEY`
 
 ## Build pro produkci
 
@@ -62,7 +61,7 @@ Ikony můžete vygenerovat pomocí nástrojů jako [PWA Asset Generator](https:/
 
 1. Pushněte kód do Git repozitáře
 2. Připojte repozitář k Vercel
-3. Přidejte všechny proměnné prostředí z `.env` do Vercel projektu
+3. V **Vercel → Project → Settings → Environment Variables** přidejte všechny proměnné z `.env.example` (s vašimi reálnými hodnotami). Nepoužívejte soubor `.env` z repozitáře – klíče nastavte pouze ve Vercel UI.
 4. Deploy!
 
 ## Struktura dat Firestore
