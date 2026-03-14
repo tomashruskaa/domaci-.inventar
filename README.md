@@ -8,6 +8,10 @@ PWA aplikace pro správu domácích zásob s AI skenováním pomocí Google Gemi
 - 📦 **Co mám doma** - Zásoby podle lokací (Lednice, Mrazák, Spíž), AI skenování, abecední řazení, inline editace, přesun do nákupního seznamu
 - 📊 **Statistiky** - Přehled měsíční útraty s koláčovým grafem
 - 🤖 **AI Skenování** - Analýza fotek pomocí Google Gemini API (pouze v sekci Inventář)
+- 🔗 **Import z URL receptu** (Seznam) – vložte odkaz na recept, aplikace stáhne stránku na serveru a vyextrahuje suroviny do nákupního seznamu (s potvrzovacím modulem).
+- 🧾 **Účtenka** (Doma → Vyfotit účtenku) – rozpoznání položek z fotky účtenky a automatické zařazení do Lednice / Mrazák / Spíž s možností úpravy před uložením.
+- ↔️ **Přetahování položek** (Doma) – přetáhněte položku na záložku Lednice, Mrazák nebo Spíž a změní se její lokace.
+- **Desetinná množství** – všude, kde se zadává množství, lze použít čárku i tečku (např. 1,5 nebo 1.5).
 
 ## Instalace
 
@@ -61,8 +65,8 @@ Ikony můžete vygenerovat pomocí nástrojů jako [PWA Asset Generator](https:/
 
 1. Pushněte kód do Git repozitáře
 2. Připojte repozitář k Vercel
-3. V **Vercel → Project → Settings → Environment Variables** přidejte všechny proměnné z `.env.example` (s vašimi reálnými hodnotami). Nepoužívejte soubor `.env` z repozitáře – klíče nastavte pouze ve Vercel UI.
-4. Deploy!
+3. V **Vercel → Project → Settings → Environment Variables** přidejte všechny proměnné z `.env.example` (s vašimi reálnými hodnotami). Pro **import receptu** a **rozpoznání účtenky** je potřeba také **GEMINI_API_KEY** (stejná hodnota jako VITE_GEMINI_API_KEY) – tyto funkce běží na serveru a klíč se do prohlížeče neposílá.
+4. Deploy! Pro lokální testování API (recept, účtenka) spusťte `vercel dev` místo `npm run dev`.
 
 ## Struktura dat Firestore
 

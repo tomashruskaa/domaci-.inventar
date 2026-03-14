@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { initializeApp } from 'firebase/app'
 import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, query, where, onSnapshot, serverTimestamp } from 'firebase/firestore'
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth'
-import { ShoppingBag, Warehouse, PieChart, Camera, X, Plus, Pencil, ShoppingCart, ChevronRight, ChefHat, Trash2, Receipt, Image } from 'lucide-react'
+import { ShoppingBag, Warehouse, PieChart, Camera, X, Plus, Pencil, ShoppingCart, ChevronRight, ChefHat, Trash2, Receipt, Image, Link2, GripVertical } from 'lucide-react'
+import { parseDecimal, formatQuantity } from './utils/parsing'
 
 // Firebase
 const firebaseConfig = {
@@ -207,6 +208,11 @@ export default function App() {
   const [showCookModal, setShowCookModal] = useState(false)
   const [cookLoading, setCookLoading] = useState(false)
   const [recipes, setRecipes] = useState([])
+  const [showRecipeImportModal, setShowRecipeImportModal] = useState(false)
+  const [recipeImportItems, setRecipeImportItems] = useState([])
+  const [recipeImportLoading, setRecipeImportLoading] = useState(false)
+  const [showReceiptModal, setShowReceiptModal] = useState(false)
+  const [receiptItems, setReceiptItems] = useState([])
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
@@ -244,13 +250,14 @@ export default function App() {
   const homeByLocation = (loc) =>
     homeItems.filter((i) => i.location === loc).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'cs'))
 
-  const addToShopping = async (name, amount, category) => {
+  const addToShopping = async (name, amount, category, unit = 'ks') => {
     try {
+      const u = ['ks', 'g', 'kg', 'ml', 'l'].includes(unit) ? unit : 'ks'
       await addDoc(collection(db, 'items'), {
         appId: APP_ID,
         name: name || 'Položka',
-        amount: Number(amount) || 1,
-        unit: 'ks',
+        amount: parseDecimal(amount) || 1,
+        unit: u,
         category: category || 'Ostatní',
         status: 'shopping',
         isBought: false,
@@ -313,7 +320,7 @@ export default function App() {
     }
   }
 
-  const handlePhoto = (e) => {
+  const handlePhoto = (e, isReceipt = false) => {
     const file = e.target.files?.[0]
     if (!file) return
     const mimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
@@ -324,9 +331,22 @@ export default function App() {
         const dataUrl = reader.result
         const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
         if (!base64) throw new Error('Nepodařilo se načíst obrázek')
-        const list = await callGeminiForImage(base64, mimeType)
-        setReviewItems(list.length ? list : [{ name: 'Neznámý', amount: 1, unit: 'ks', category: 'Ostatní' }])
-        setShowReviewModal(true)
+        if (isReceipt) {
+          const res = await fetch(`${window.location.origin}/api/receipt`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageBase64: base64, mimeType })
+          })
+          const data = await res.json()
+          if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+          const list = (data.items || []).map((it) => ({ ...it, included: true }))
+          setReceiptItems(list.length ? list : [{ name: 'Neznámý', amount: 1, unit: 'ks', location: 'Spíž', included: true }])
+          setShowReceiptModal(true)
+        } else {
+          const list = await callGeminiForImage(base64, mimeType)
+          setReviewItems(list.length ? list : [{ name: 'Neznámý', amount: 1, unit: 'ks', category: 'Ostatní' }])
+          setShowReviewModal(true)
+        }
       } catch (err) {
         const message = err?.message || 'Neznámá chyba'
         console.error('AI analýza fotky:', message)
@@ -346,13 +366,32 @@ export default function App() {
     reader.readAsDataURL(file)
   }
 
+  const saveReceiptToHome = async () => {
+    for (const it of receiptItems.filter((i) => i.included)) {
+      await addDoc(collection(db, 'items'), {
+        appId: APP_ID,
+        name: it.name || 'Položka',
+        amount: parseDecimal(it.amount) || 1,
+        unit: ['ks', 'g', 'kg', 'ml', 'l'].includes(it.unit) ? it.unit : 'ks',
+        category: CATEGORIES.includes(it.category) ? it.category : 'Ostatní',
+        status: 'home',
+        location: it.location || 'Spíž',
+        consumeWithinDays: 7,
+        emoji: getItemEmoji(it.name || ''),
+        createdAt: serverTimestamp()
+      })
+    }
+    setShowReceiptModal(false)
+    setReceiptItems([])
+  }
+
   const saveReviewToHome = async () => {
     const location = selectedLocation
     for (const it of reviewItems) {
       await addDoc(collection(db, 'items'), {
         appId: APP_ID,
         name: it.name || 'Položka',
-        amount: Number(it.amount) || 1,
+        amount: parseDecimal(it.amount) || 1,
         unit: ['ks', 'g', 'kg', 'ml', 'l'].includes(it.unit) ? it.unit : 'ks',
         category: CATEGORIES.includes(it.category) ? it.category : 'Ostatní',
         status: 'home',
@@ -397,6 +436,25 @@ export default function App() {
             setEditingShoppingId={setEditingShoppingId}
             updateItem={updateItem}
             getItemEmoji={getItemEmoji}
+            onImportFromRecipe={async (url) => {
+              setRecipeImportLoading(true)
+              try {
+                const res = await fetch(`${window.location.origin}/api/recipe`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ url })
+                })
+                const data = await res.json()
+                if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+                setRecipeImportItems(data.items || [])
+                setShowRecipeImportModal(true)
+              } catch (err) {
+                alert(err?.message || 'Import z receptu selhal.')
+              } finally {
+                setRecipeImportLoading(false)
+              }
+            }}
+            recipeImportLoading={recipeImportLoading}
           />
         )}
         {activeSection === 'home' && (
@@ -405,7 +463,8 @@ export default function App() {
             selectedLocation={selectedLocation}
             setSelectedLocation={setSelectedLocation}
             homeByLocation={homeByLocation}
-            onScan={handlePhoto}
+            onScan={(e) => handlePhoto(e, false)}
+            onScanReceipt={(e) => handlePhoto(e, true)}
             aiLoading={aiLoading}
             editingId={editingId}
             setEditingId={setEditingId}
@@ -475,7 +534,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Review modal */}
+      {/* Review modal (lednice / galerie) */}
       {showReviewModal && (
         <ReviewModal
           items={reviewItems}
@@ -494,7 +553,50 @@ export default function App() {
         />
       )}
 
+      {/* Receipt review modal (účtenka – s lokací a zaškrtávátkem) */}
+      {showReceiptModal && (
+        <ReceiptReviewModal
+          items={receiptItems}
+          locations={LOCATIONS}
+          onUpdate={(idx, field, value) => {
+            const next = [...receiptItems]
+            next[idx] = { ...next[idx], [field]: value }
+            setReceiptItems(next)
+          }}
+          onToggleIncluded={(idx) => {
+            const next = [...receiptItems]
+            next[idx] = { ...next[idx], included: !next[idx].included }
+            setReceiptItems(next)
+          }}
+          onSave={saveReceiptToHome}
+          onClose={() => { setShowReceiptModal(false); setReceiptItems([]) }}
+          UNITS={UNITS}
+        />
+      )}
+
       {/* Co dnes uvařit? modal */}
+      {/* Recipe import confirmation modal */}
+      {showRecipeImportModal && (
+        <RecipeImportModal
+          items={recipeImportItems}
+          categories={CATEGORIES}
+          onUpdate={(idx, field, value) => {
+            const next = [...recipeImportItems]
+            next[idx] = { ...next[idx], [field]: value }
+            setRecipeImportItems(next)
+          }}
+          onRemove={(idx) => setRecipeImportItems(recipeImportItems.filter((_, i) => i !== idx))}
+          onConfirm={async () => {
+            for (const it of recipeImportItems) {
+              await addToShopping(it.name || 'Položka', parseDecimal(it.amount) || 1, it.category || 'Ostatní', it.unit || 'ks')
+            }
+            setShowRecipeImportModal(false)
+            setRecipeImportItems([])
+          }}
+          onClose={() => { setShowRecipeImportModal(false); setRecipeImportItems([]) }}
+        />
+      )}
+
       {showCookModal && (
         <CookModal
           onClose={() => { setShowCookModal(false); setRecipes([]) }}
@@ -531,12 +633,15 @@ function ShoppingSection({
   editingShoppingId,
   setEditingShoppingId,
   updateItem,
-  getItemEmoji
+  getItemEmoji,
+  onImportFromRecipe,
+  recipeImportLoading
 }) {
   const [name, setName] = useState('')
-  const [amount, setAmount] = useState(1)
+  const [amount, setAmount] = useState('1')
   const [category, setCategory] = useState('Ostatní')
   const [showForm, setShowForm] = useState(false)
+  const [recipeUrl, setRecipeUrl] = useState('')
 
   const editingItem = editingShoppingId
     ? [...shoppingByCategory.flatMap((s) => s.items), ...boughtItems].find((i) => i.id === editingShoppingId)
@@ -545,11 +650,19 @@ function ShoppingSection({
   const submit = (e) => {
     e.preventDefault()
     if (!name.trim()) return
-    addToShopping(name.trim(), amount, category)
+    addToShopping(name.trim(), parseDecimal(amount) || 1, category)
     setName('')
-    setAmount(1)
+    setAmount('1')
     setCategory('Ostatní')
     setShowForm(false)
+  }
+
+  const handleRecipeImport = (e) => {
+    e.preventDefault()
+    const url = recipeUrl.trim()
+    if (!url) return
+    onImportFromRecipe?.(url)
+    setRecipeUrl('')
   }
 
   return (
@@ -558,6 +671,24 @@ function ShoppingSection({
         <ShoppingCart className="w-8 h-8 text-slate-300" />
         Nákupní seznam
       </h1>
+
+      <form onSubmit={handleRecipeImport} className="bg-slate-800 rounded-2xl p-4 border border-slate-600 shadow-sm space-y-2">
+        <label className="block text-sm text-slate-400">Import z URL receptu</label>
+        <div className="flex gap-2">
+          <input
+            type="url"
+            value={recipeUrl}
+            onChange={(e) => setRecipeUrl(e.target.value)}
+            placeholder="https://..."
+            className="flex-1 px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            disabled={recipeImportLoading}
+          />
+          <button type="submit" disabled={recipeImportLoading || !recipeUrl.trim()} className="px-4 py-2 rounded-xl bg-slate-600 text-white font-medium hover:bg-slate-500 disabled:opacity-50 flex items-center gap-2 shrink-0">
+            <Link2 className="w-4 h-4" />
+            {recipeImportLoading ? 'Načítám…' : 'Importovat'}
+          </button>
+        </div>
+      </form>
 
       {!showForm ? (
         <button
@@ -579,11 +710,12 @@ function ShoppingSection({
           />
           <div className="grid grid-cols-2 gap-3">
             <input
-              type="number"
-              min="1"
+              type="text"
+              inputMode="decimal"
               value={amount}
-              onChange={(e) => setAmount(Number(e.target.value) || 1)}
-              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="Množství"
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <select
               value={category}
@@ -622,7 +754,7 @@ function ShoppingSection({
                   <span className="text-xl shrink-0" aria-hidden>{item.emoji || getItemEmoji(item.name)}</span>
                   <div className="flex-1 min-w-0">
                     <span className="font-medium text-white block">{item.name}</span>
-                    <span className="text-sm text-slate-400">{item.amount} {item.unit}</span>
+                    <span className="text-sm text-slate-400">{formatQuantity(item.amount)} {item.unit}</span>
                   </div>
                   <button type="button" onClick={() => setEditingShoppingId(item.id)} className="p-2 text-slate-400 hover:text-blue-400 rounded-lg" title="Upravit">
                     <Pencil className="w-4 h-4" />
@@ -661,7 +793,7 @@ function ShoppingSection({
                 <span className="text-xl shrink-0" aria-hidden>{item.emoji || getItemEmoji(item.name)}</span>
                 <div className="flex-1 min-w-0">
                   <span className="font-medium text-slate-400 line-through block">{item.name}</span>
-                  <span className="text-sm text-slate-500">{item.amount} {item.unit}</span>
+                  <span className="text-sm text-slate-500">{formatQuantity(item.amount)} {item.unit}</span>
                 </div>
                 <button type="button" onClick={() => setEditingShoppingId(item.id)} className="p-2 text-slate-400 hover:text-blue-400 rounded-lg">
                   <Pencil className="w-4 h-4" />
@@ -698,7 +830,7 @@ function ShoppingSection({
 
 function ShoppingEditModal({ item, categories, onSave, onClose, onDelete }) {
   const [name, setName] = useState(item.name || '')
-  const [amount, setAmount] = useState(item.amount ?? 1)
+  const [amount, setAmount] = useState(String(item.amount ?? 1).replace('.', ','))
   const [category, setCategory] = useState(item.category || 'Ostatní')
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
@@ -717,10 +849,11 @@ function ShoppingEditModal({ item, categories, onSave, onClose, onDelete }) {
           className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white mb-3"
         />
         <input
-          type="number"
-          min="1"
+          type="text"
+          inputMode="decimal"
           value={amount}
-          onChange={(e) => setAmount(Number(e.target.value) || 1)}
+          onChange={(e) => setAmount(e.target.value)}
+          placeholder="Množství"
           className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white mb-3"
         />
         <select
@@ -738,7 +871,7 @@ function ShoppingEditModal({ item, categories, onSave, onClose, onDelete }) {
           </button>
           <button
             type="button"
-            onClick={() => onSave({ name: name.trim() || item.name, amount: Number(amount) || 1, category })}
+            onClick={() => onSave({ name: name.trim() || item.name, amount: parseDecimal(amount) || 1, category })}
             className="flex-1 py-2 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600"
           >
             Uložit
@@ -755,6 +888,7 @@ function HomeSection({
   setSelectedLocation,
   homeByLocation,
   onScan,
+  onScanReceipt,
   aiLoading,
   editingId,
   setEditingId,
@@ -797,7 +931,7 @@ function HomeSection({
               Vyfotit účtenku
             </span>
             <ChevronRight className="w-5 h-5 text-slate-400" />
-            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onScan} disabled={aiLoading} />
+            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onScanReceipt} disabled={aiLoading} />
           </label>
           <label className="flex items-center justify-between w-full py-3 px-3 rounded-xl bg-slate-700/50 hover:bg-slate-700 text-white cursor-pointer">
             <span className="flex items-center gap-3">
@@ -823,10 +957,19 @@ function HomeSection({
           {locations.map((loc) => (
             <button
               key={loc}
+              type="button"
               onClick={() => setSelectedLocation(loc)}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.dataset.dragOver = 'true' }}
+              onDragLeave={(e) => { delete e.currentTarget.dataset.dragOver }}
+              onDrop={(e) => {
+                e.preventDefault()
+                delete e.currentTarget.dataset.dragOver
+                const id = e.dataTransfer.getData('application/x-domaci-inventar-item-id')
+                if (id) updateItem(id, { location: loc })
+              }}
               className={`px-4 py-2 font-medium whitespace-nowrap transition-colors ${
                 selectedLocation === loc ? 'bg-blue-500 text-white' : 'text-slate-300 hover:bg-slate-700'
-              }`}
+              } data-[drag-over=true]:ring-2 data-[drag-over=true]:ring-blue-400`}
             >
               {loc}
             </button>
@@ -851,12 +994,21 @@ function HomeSection({
             {list.map((item) => {
               const expiry = formatExpiry(item)
               return (
-                <li key={item.id} className="flex items-center gap-3 py-2 border-b border-slate-600 last:border-0">
+                <li
+                  key={item.id}
+                  draggable
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData('application/x-domaci-inventar-item-id', item.id)
+                    e.dataTransfer.effectAllowed = 'move'
+                  }}
+                  className="flex items-center gap-3 py-2 border-b border-slate-600 last:border-0 cursor-grab active:cursor-grabbing"
+                >
+                  <span className="text-slate-500 shrink-0 touch-none" aria-label="Přetáhnout"><GripVertical className="w-4 h-4" /></span>
                   <span className="text-xl shrink-0" aria-hidden>{item.emoji || getItemEmoji(item.name)}</span>
                   <div className="flex-1 min-w-0">
                     <span className="font-medium text-white block">{item.name}</span>
                     <span className="text-sm text-slate-400">
-                      {item.amount} {item.unit}
+                      {formatQuantity(item.amount)} {item.unit}
                       {expiry ? ` · do ${expiry}` : ''}
                     </span>
                   </div>
@@ -865,7 +1017,7 @@ function HomeSection({
                     onClick={() => {
                       setEditingId(item.id)
                       setEditName(item.name || '')
-                      setEditAmount(item.amount ?? 0)
+                      setEditAmount(item.amount != null ? String(item.amount).replace('.', ',') : '0')
                       setEditUnit(item.unit || 'ks')
                       setEditCategory(item.category || 'Ostatní')
                       setEditEmoji(item.emoji || getItemEmoji(item.name))
@@ -913,7 +1065,7 @@ function HomeSection({
           units={UNITS}
           onSave={() => updateItem(editingId, {
             name: editName,
-            amount: Number(editAmount) || 0,
+            amount: parseDecimal(editAmount) || 0,
             unit: editUnit,
             category: editCategory,
             emoji: editEmoji,
@@ -972,10 +1124,11 @@ function ItemEditModal({
           <div>
             <label className="block text-sm text-slate-400 mb-1">Množství</label>
             <input
-              type="number"
-              min="0"
-              value={amount}
-              onChange={(e) => onAmountChange(Number(e.target.value) || 0)}
+              type="text"
+              inputMode="decimal"
+              value={amount ?? ''}
+              onChange={(e) => onAmountChange(e.target.value)}
+              placeholder="1 nebo 1,5"
               className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
             />
           </div>
@@ -1202,7 +1355,7 @@ function ReviewModal({ items, categories, locations, selectedLocation, setSelect
               <input
                 type="number"
                 min="0"
-                value={item.amount ?? ''}
+                value={item.amount != null ? String(item.amount).replace('.', ',') : ''}
                 onChange={(e) => onUpdate(idx, 'amount', e.target.value)}
                 className="w-16 px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
               />
@@ -1237,6 +1390,140 @@ function ReviewModal({ items, categories, locations, selectedLocation, setSelect
           </button>
           <button type="button" onClick={onSave} className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600">
             Uložit vše
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function RecipeImportModal({ items, categories, onUpdate, onRemove, onConfirm, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto border border-slate-600">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-bold text-white">Položky z receptu</h2>
+          <button type="button" onClick={onClose} className="p-2 text-slate-400 hover:text-white rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <p className="text-sm text-slate-400 mb-3">Upravte položky a potvrďte přidání do nákupního seznamu.</p>
+        <ul className="space-y-3 mb-6">
+          {items.map((item, idx) => (
+            <li key={idx} className="bg-slate-700/50 rounded-xl p-3 flex flex-wrap items-center gap-2 border border-slate-600">
+              <input
+                type="text"
+                value={item.name || ''}
+                onChange={(e) => onUpdate(idx, 'name', e.target.value)}
+                placeholder="Název"
+                className="flex-1 min-w-[100px] px-3 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              />
+              <input
+                type="text"
+                inputMode="decimal"
+                value={item.amount != null ? String(item.amount).replace('.', ',') : ''}
+                onChange={(e) => onUpdate(idx, 'amount', e.target.value)}
+                placeholder="Množství"
+                className="w-20 px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              />
+              <select
+                value={item.unit || 'ks'}
+                onChange={(e) => onUpdate(idx, 'unit', e.target.value)}
+                className="px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              >
+                {['ks', 'g', 'kg', 'ml', 'l'].map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+              <select
+                value={item.category || 'Ostatní'}
+                onChange={(e) => onUpdate(idx, 'category', e.target.value)}
+                className="px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              >
+                {categories.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <button type="button" onClick={() => onRemove(idx)} className="text-red-400 hover:text-red-300 text-sm p-1">
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-3">
+          <button type="button" onClick={onClose} className="flex-1 py-3 rounded-xl bg-slate-600 text-slate-200 font-medium">
+            Zrušit
+          </button>
+          <button type="button" onClick={onConfirm} className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600">
+            Přidat do seznamu
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ReceiptReviewModal({ items, locations, onUpdate, onToggleIncluded, onSave, onClose, UNITS }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto border border-slate-600">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-bold text-white">Položky z účtenky</h2>
+          <button type="button" onClick={onClose} className="p-2 text-slate-400 hover:text-white rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <p className="text-sm text-slate-400 mb-3">Upravte lokaci (Lednice/Mrazák/Spíž) a zaškrtněte, co chcete přidat.</p>
+        <ul className="space-y-3 mb-6">
+          {items.map((item, idx) => (
+            <li key={idx} className={`rounded-xl p-3 flex flex-wrap items-center gap-2 border ${item.included ? 'bg-slate-700/50 border-slate-600' : 'bg-slate-800 border-slate-700 opacity-70'}`}>
+              <input
+                type="checkbox"
+                checked={!!item.included}
+                onChange={() => onToggleIncluded(idx)}
+                className="w-5 h-5 rounded border-slate-500 text-blue-500 bg-slate-700 shrink-0"
+              />
+              <input
+                type="text"
+                value={item.name || ''}
+                onChange={(e) => onUpdate(idx, 'name', e.target.value)}
+                placeholder="Název"
+                className="flex-1 min-w-[80px] px-3 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              />
+              <input
+                type="text"
+                inputMode="decimal"
+                value={item.amount != null ? String(item.amount).replace('.', ',') : ''}
+                onChange={(e) => onUpdate(idx, 'amount', e.target.value)}
+                className="w-16 px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              />
+              <select
+                value={item.unit || 'ks'}
+                onChange={(e) => onUpdate(idx, 'unit', e.target.value)}
+                className="px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              >
+                {UNITS.map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+              <select
+                value={item.location || 'Spíž'}
+                onChange={(e) => onUpdate(idx, 'location', e.target.value)}
+                className="px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
+              >
+                {locations.map((loc) => (
+                  <option key={loc} value={loc}>{loc}</option>
+                ))}
+              </select>
+            </li>
+          ))}
+        </ul>
+        <div className="flex gap-3">
+          <button type="button" onClick={onClose} className="flex-1 py-3 rounded-xl bg-slate-600 text-slate-200 font-medium">
+            Zrušit
+          </button>
+          <button type="button" onClick={onSave} className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600">
+            Uložit do inventáře
           </button>
         </div>
       </div>
