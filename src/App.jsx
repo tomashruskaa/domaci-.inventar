@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { initializeApp } from 'firebase/app'
-import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, query, where, onSnapshot } from 'firebase/firestore'
+import { getFirestore, collection, addDoc, updateDoc, deleteDoc, doc, query, where, onSnapshot, serverTimestamp } from 'firebase/firestore'
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth'
-import { ShoppingBag, Warehouse, PieChart, Camera, X, Plus, Pencil, ShoppingCart } from 'lucide-react'
+import { ShoppingBag, Warehouse, PieChart, Camera, X, Plus, Pencil, ShoppingCart, ChevronRight, ChefHat, Trash2, Receipt, Image } from 'lucide-react'
 
 // Firebase
 const firebaseConfig = {
@@ -59,6 +59,18 @@ function getItemEmoji(name) {
     if (keywords.some((kw) => n.includes(kw))) return emoji
   }
   return '🛒'
+}
+
+function formatExpiry(item) {
+  if (item.expiryDate) {
+    return new Date(item.expiryDate).toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric' })
+  }
+  if (item.createdAt && item.consumeWithinDays != null) {
+    const d = new Date(item.createdAt?.toMillis?.() ?? item.createdAt)
+    d.setDate(d.getDate() + Number(item.consumeWithinDays))
+    return d.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric' })
+  }
+  return null
 }
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || 'AIzaSyCYnLRNdA8C3Krr2F0QyuaqPo1H2tHvlRY'
@@ -145,6 +157,36 @@ Příklad: [{"name":"Mléko","amount":500,"unit":"ml","category":"Chlazené"},{"
   throw lastError || new Error('Analýza fotky selhala')
 }
 
+async function callGeminiForRecipes(itemNames, retries = 2) {
+  const prompt = `Máš k dispozici tyto suroviny v lednici: ${itemNames.join(', ')}.
+Vrať POUZE validní JSON pole 2 receptů. Každý recept: title (string, česky), description (string, krátký popis), ingredients (pole stringů - názvy surovin), steps (pole stringů - číslované kroky v češtině).
+Příklad: [{"title":"Vaječná omeleta","description":"Rychlá snídaně.","ingredients":["Vejce","Sýr"],"steps":["Rozšlehejte vejce.","Smažte na pánvi."]}]`
+
+  const payload = { contents: [{ parts: [{ text: prompt }] }] }
+  for (const model of GEMINI_MODELS) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const res = await fetch(getGeminiUrl(model), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.ok}`)
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text
+        if (!text) throw new Error('Prázdná odpověď')
+        const match = text.match(/\[[\s\S]*\]/)
+        const parsed = match ? JSON.parse(match[0]) : []
+        return Array.isArray(parsed) ? parsed : []
+      } catch (e) {
+        if (i === retries - 1 && model === GEMINI_MODELS[GEMINI_MODELS.length - 1]) throw e
+        await delay(1000)
+      }
+    }
+  }
+  return []
+}
+
 export default function App() {
   const [user, setUser] = useState(null)
   const [activeSection, setActiveSection] = useState('shopping')
@@ -157,6 +199,14 @@ export default function App() {
   const [editingId, setEditingId] = useState(null)
   const [editName, setEditName] = useState('')
   const [editAmount, setEditAmount] = useState(0)
+  const [editUnit, setEditUnit] = useState('ks')
+  const [editCategory, setEditCategory] = useState('Ostatní')
+  const [editEmoji, setEditEmoji] = useState('🛒')
+  const [editConsumeWithinDays, setEditConsumeWithinDays] = useState(7)
+  const [editingShoppingId, setEditingShoppingId] = useState(null)
+  const [showCookModal, setShowCookModal] = useState(false)
+  const [cookLoading, setCookLoading] = useState(false)
+  const [recipes, setRecipes] = useState([])
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
@@ -203,11 +253,26 @@ export default function App() {
         unit: 'ks',
         category: category || 'Ostatní',
         status: 'shopping',
-        isBought: false
+        isBought: false,
+        emoji: getItemEmoji(name || '')
       })
     } catch (e) {
       console.error(e)
       alert('Nepodařilo se přidat položku.')
+    }
+  }
+
+  const moveBoughtToHome = async () => {
+    try {
+      for (const item of boughtItems) {
+        await updateDoc(doc(db, 'items', item.id), {
+          status: 'home',
+          location: 'Lednice',
+          isBought: false
+        })
+      }
+    } catch (e) {
+      console.error(e)
     }
   }
 
@@ -291,7 +356,10 @@ export default function App() {
         unit: ['ks', 'g', 'kg', 'ml', 'l'].includes(it.unit) ? it.unit : 'ks',
         category: CATEGORIES.includes(it.category) ? it.category : 'Ostatní',
         status: 'home',
-        location
+        location,
+        consumeWithinDays: 7,
+        emoji: getItemEmoji(it.name || ''),
+        createdAt: serverTimestamp()
       })
     }
     setShowReviewModal(false)
@@ -300,39 +368,22 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <span className="text-gray-500">Načítání…</span>
+      <div className="min-h-screen flex items-center justify-center bg-transparent">
+        <span className="text-slate-300">Načítání…</span>
       </div>
     )
   }
 
-  return (
-    <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row">
-      {/* Navigace: desktop = boční, mobil = horní */}
-      <nav className="flex md:flex-col md:w-52 md:min-h-screen bg-white border-b md:border-b-0 md:border-r border-gray-200 shrink-0">
-        <div className="flex md:flex-col w-full">
-          {[
-            { id: 'shopping', label: 'Nákupní seznam', Icon: ShoppingBag },
-            { id: 'home', label: 'Co mám doma', Icon: Warehouse },
-            { id: 'stats', label: 'Přehled', Icon: PieChart }
-          ].map(({ id, label, Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveSection(id)}
-              className={`flex items-center justify-center gap-2 md:justify-start md:px-6 py-4 text-sm font-medium transition-colors border-b md:border-b-0 md:border-r border-transparent ${
-                activeSection === id
-                  ? 'bg-blue-50 text-blue-600 border-blue-200'
-                  : 'text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              <Icon className="w-5 h-5 shrink-0" />
-              <span>{label}</span>
-            </button>
-          ))}
-        </div>
-      </nav>
+  const tabConfig = [
+    { id: 'shopping', label: 'Seznam', Icon: ShoppingBag },
+    { id: 'home', label: 'Doma', Icon: Warehouse },
+    { id: 'stats', label: 'Přehled', Icon: PieChart }
+  ]
 
-      <main className="flex-1 p-4 md:p-6 lg:p-8 pb-24 md:pb-8">
+  return (
+    <div className="min-h-screen flex flex-col">
+      <main className="flex-1 p-4 md:p-6 pb-24 md:pb-8 max-w-2xl mx-auto w-full">
+        <p className="text-sm text-slate-400 mb-2">Domácí Inventář</p>
         {activeSection === 'shopping' && (
           <ShoppingSection
             categories={CATEGORIES}
@@ -341,6 +392,11 @@ export default function App() {
             addToShopping={addToShopping}
             setBought={setBought}
             deleteItem={deleteItem}
+            moveBoughtToHome={moveBoughtToHome}
+            editingShoppingId={editingShoppingId}
+            setEditingShoppingId={setEditingShoppingId}
+            updateItem={updateItem}
+            getItemEmoji={getItemEmoji}
           />
         )}
         {activeSection === 'home' && (
@@ -352,42 +408,69 @@ export default function App() {
             onScan={handlePhoto}
             aiLoading={aiLoading}
             editingId={editingId}
+            setEditingId={setEditingId}
             editName={editName}
             editAmount={editAmount}
-            setEditingId={setEditingId}
+            editUnit={editUnit}
+            editCategory={editCategory}
+            editEmoji={editEmoji}
+            editConsumeWithinDays={editConsumeWithinDays}
             setEditName={setEditName}
             setEditAmount={setEditAmount}
+            setEditUnit={setEditUnit}
+            setEditCategory={setEditCategory}
+            setEditEmoji={setEditEmoji}
+            setEditConsumeWithinDays={setEditConsumeWithinDays}
             updateItem={updateItem}
             moveToShopping={moveToShopping}
             deleteItem={deleteItem}
+            onOpenCookModal={async () => {
+              setShowCookModal(true)
+              setCookLoading(true)
+              setRecipes([])
+              try {
+                const names = homeItems.map((i) => i.name).filter(Boolean)
+                const list = await callGeminiForRecipes(names.length ? names : ['mléko', 'chléb'])
+                setRecipes(list)
+              } catch (e) {
+                console.error(e)
+                setRecipes([{ title: 'Recept se nepodařilo načíst', description: '', ingredients: [], steps: [] }])
+              } finally {
+                setCookLoading(false)
+              }
+            }}
+            formatExpiry={formatExpiry}
+            getItemEmoji={getItemEmoji}
+            CATEGORIES={CATEGORIES}
+            UNITS={UNITS}
           />
         )}
         {activeSection === 'stats' && <StatsSection />}
       </main>
 
-      {/* Mobil: spodní tab bar */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-white border-t border-gray-200 flex justify-around items-center z-30 safe-area-pb">
-        {[
-          { id: 'shopping', Icon: ShoppingBag },
-          { id: 'home', Icon: Warehouse },
-          { id: 'stats', Icon: PieChart }
-        ].map(({ id, Icon }) => (
+      {/* Spodní tab bar: Seznam / Doma / Přehled */}
+      <div className="fixed bottom-0 left-0 right-0 h-20 bg-slate-800/95 border-t border-slate-700 flex justify-around items-center z-30 safe-area-pb">
+        {tabConfig.map(({ id, label, Icon }) => (
           <button
             key={id}
             onClick={() => setActiveSection(id)}
-            className={`p-3 rounded-xl transition-colors ${activeSection === id ? 'text-blue-600 bg-blue-50' : 'text-gray-400'}`}
+            className={`flex flex-col items-center justify-center gap-1 py-2 px-4 rounded-2xl transition-colors min-w-[72px] ${
+              activeSection === id ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'
+            }`}
           >
-            <Icon className="w-6 h-6" />
+            <Icon className="w-6 h-6 shrink-0" />
+            <span className="text-xs font-medium">{label}</span>
           </button>
         ))}
       </div>
 
-      {/* AI loading */}
+      {/* AI analyzuje overlay */}
       {aiLoading && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl px-8 py-6 shadow-xl text-center">
-            <div className="w-10 h-10 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-            <p className="text-gray-700 font-medium">AI analyzuje fotku…</p>
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-800 rounded-2xl px-8 py-6 shadow-xl text-center max-w-sm border border-slate-600">
+            <div className="w-10 h-10 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-white font-medium">AI analyzuje…</p>
+            <p className="text-sm text-slate-400 mt-2">Tip: u lednice zkuste fotit z větší dálky, aby byly vidět celé police.</p>
           </div>
         </div>
       )}
@@ -410,15 +493,54 @@ export default function App() {
           onClose={() => { setShowReviewModal(false); setReviewItems([]) }}
         />
       )}
+
+      {/* Co dnes uvařit? modal */}
+      {showCookModal && (
+        <CookModal
+          onClose={() => { setShowCookModal(false); setRecipes([]) }}
+          loading={cookLoading}
+          recipes={recipes}
+          onTryAgain={async () => {
+            setCookLoading(true)
+            setRecipes([])
+            try {
+              const names = homeItems.map((i) => i.name).filter(Boolean)
+              const list = await callGeminiForRecipes(names.length ? names : ['mléko', 'chléb'])
+              setRecipes(list)
+            } catch (e) {
+              console.error(e)
+              setRecipes([{ title: 'Recept se nepodařilo načíst', description: '', ingredients: [], steps: [] }])
+            } finally {
+              setCookLoading(false)
+            }
+          }}
+        />
+      )}
     </div>
   )
 }
 
-function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToShopping, setBought, deleteItem }) {
+function ShoppingSection({
+  categories,
+  shoppingByCategory,
+  boughtItems,
+  addToShopping,
+  setBought,
+  deleteItem,
+  moveBoughtToHome,
+  editingShoppingId,
+  setEditingShoppingId,
+  updateItem,
+  getItemEmoji
+}) {
   const [name, setName] = useState('')
   const [amount, setAmount] = useState(1)
   const [category, setCategory] = useState('Ostatní')
   const [showForm, setShowForm] = useState(false)
+
+  const editingItem = editingShoppingId
+    ? [...shoppingByCategory.flatMap((s) => s.items), ...boughtItems].find((i) => i.id === editingShoppingId)
+    : null
 
   const submit = (e) => {
     e.preventDefault()
@@ -431,25 +553,28 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Nákupní seznam</h1>
+    <div className="space-y-6">
+      <h1 className="text-2xl md:text-3xl font-bold text-white flex items-center gap-2">
+        <ShoppingCart className="w-8 h-8 text-slate-300" />
+        Nákupní seznam
+      </h1>
 
       {!showForm ? (
         <button
           onClick={() => setShowForm(true)}
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl bg-blue-500 text-white font-medium hover:bg-blue-600 transition-colors"
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl bg-blue-500 text-white font-medium hover:bg-blue-600 transition-colors shadow-lg"
         >
           <Plus className="w-5 h-5" />
           Přidat položku
         </button>
       ) : (
-        <form onSubmit={submit} className="bg-white rounded-2xl p-4 md:p-5 shadow-sm space-y-4">
+        <form onSubmit={submit} className="bg-slate-800 rounded-2xl p-4 md:p-5 border border-slate-600 shadow-sm space-y-4">
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Název"
-            className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             autoFocus
           />
           <div className="grid grid-cols-2 gap-3">
@@ -458,12 +583,12 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
               min="1"
               value={amount}
               onChange={(e) => setAmount(Number(e.target.value) || 1)}
-              className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
             <select
               value={category}
               onChange={(e) => setCategory(e.target.value)}
-              className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               {categories.map((c) => (
                 <option key={c} value={c}>{c}</option>
@@ -471,7 +596,7 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
             </select>
           </div>
           <div className="flex gap-2">
-            <button type="button" onClick={() => setShowForm(false)} className="flex-1 py-2 rounded-xl bg-gray-100 text-gray-700 font-medium">
+            <button type="button" onClick={() => setShowForm(false)} className="flex-1 py-2 rounded-xl bg-slate-600 text-slate-200 font-medium">
               Zrušit
             </button>
             <button type="submit" className="flex-1 py-2 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600">
@@ -483,22 +608,27 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
 
       {shoppingByCategory.map(({ category: cat, items: catItems }) =>
         catItems.length > 0 ? (
-          <section key={cat} className="bg-white rounded-2xl p-4 md:p-5 shadow-sm">
-            <h2 className="text-lg font-semibold text-gray-900 mb-3">{cat}</h2>
+          <section key={cat} className="bg-slate-800 rounded-2xl p-4 md:p-5 border border-slate-600 shadow-sm">
+            <h2 className="text-lg font-semibold text-white mb-3">{cat}</h2>
             <ul className="space-y-2">
               {catItems.map((item) => (
-                <li key={item.id} className="flex items-center gap-3 py-2 border-b border-gray-100 last:border-0">
+                <li key={item.id} className="flex items-center gap-3 py-2 border-b border-slate-600 last:border-0">
                   <input
                     type="checkbox"
                     checked={false}
                     onChange={() => setBought(item.id, true)}
-                    className="w-5 h-5 rounded border-gray-300 text-blue-500"
+                    className="w-5 h-5 rounded border-slate-500 text-blue-500 bg-slate-700"
                   />
-                  <span className="text-xl shrink-0" aria-hidden>{getItemEmoji(item.name)}</span>
-                  <span className="flex-1 font-medium text-gray-900">{item.name}</span>
-                  <span className="text-sm text-gray-500">{item.amount} {item.unit}</span>
-                  <button type="button" onClick={() => deleteItem(item.id)} className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg">
-                    <X className="w-4 h-4" />
+                  <span className="text-xl shrink-0" aria-hidden>{item.emoji || getItemEmoji(item.name)}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="font-medium text-white block">{item.name}</span>
+                    <span className="text-sm text-slate-400">{item.amount} {item.unit}</span>
+                  </div>
+                  <button type="button" onClick={() => setEditingShoppingId(item.id)} className="p-2 text-slate-400 hover:text-blue-400 rounded-lg" title="Upravit">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button type="button" onClick={() => deleteItem(item.id)} className="p-2 text-slate-400 hover:text-red-400 rounded-lg" title="Smazat">
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 </li>
               ))}
@@ -508,22 +638,36 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
       )}
 
       {boughtItems.length > 0 && (
-        <section className="bg-gray-100 rounded-2xl p-4 md:p-5">
-          <h2 className="text-lg font-semibold text-gray-700 mb-3">Koupeno</h2>
+        <section className="bg-slate-800 rounded-2xl p-4 md:p-5 border border-slate-600">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold text-slate-300">Koupeno</h2>
+            <button
+              type="button"
+              onClick={moveBoughtToHome}
+              className="text-sm py-1.5 px-3 rounded-xl bg-slate-600 text-slate-200 hover:bg-slate-500 font-medium"
+            >
+              Přesunout domů &gt;
+            </button>
+          </div>
           <ul className="space-y-2">
             {boughtItems.map((item) => (
-              <li key={item.id} className="flex items-center gap-3 py-2 border-b border-gray-200 last:border-0 opacity-80">
+              <li key={item.id} className="flex items-center gap-3 py-2 border-b border-slate-600 last:border-0 opacity-90">
                 <input
                   type="checkbox"
                   checked
                   onChange={() => setBought(item.id, false)}
-                  className="w-5 h-5 rounded border-gray-300 text-blue-500"
+                  className="w-5 h-5 rounded border-slate-500 text-blue-500 bg-slate-700"
                 />
-                <span className="text-xl shrink-0" aria-hidden>{getItemEmoji(item.name)}</span>
-                <span className="flex-1 font-medium text-gray-600 line-through">{item.name}</span>
-                <span className="text-sm text-gray-500">{item.amount} {item.unit}</span>
-                <button type="button" onClick={() => deleteItem(item.id)} className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg">
-                  <X className="w-4 h-4" />
+                <span className="text-xl shrink-0" aria-hidden>{item.emoji || getItemEmoji(item.name)}</span>
+                <div className="flex-1 min-w-0">
+                  <span className="font-medium text-slate-400 line-through block">{item.name}</span>
+                  <span className="text-sm text-slate-500">{item.amount} {item.unit}</span>
+                </div>
+                <button type="button" onClick={() => setEditingShoppingId(item.id)} className="p-2 text-slate-400 hover:text-blue-400 rounded-lg">
+                  <Pencil className="w-4 h-4" />
+                </button>
+                <button type="button" onClick={() => deleteItem(item.id)} className="p-2 text-slate-400 hover:text-red-400 rounded-lg">
+                  <Trash2 className="w-4 h-4" />
                 </button>
               </li>
             ))}
@@ -532,8 +676,75 @@ function ShoppingSection({ categories, shoppingByCategory, boughtItems, addToSho
       )}
 
       {shoppingByCategory.every((s) => s.items.length === 0) && boughtItems.length === 0 && (
-        <p className="text-center text-gray-500 py-8">Nákupní seznam je prázdný.</p>
+        <p className="text-center text-slate-400 py-8">Nákupní seznam je prázdný.</p>
       )}
+
+      {/* Edit shopping item modal */}
+      {editingItem && (
+        <ShoppingEditModal
+          item={editingItem}
+          categories={categories}
+          onSave={(updates) => {
+            updateItem(editingItem.id, updates)
+            setEditingShoppingId(null)
+          }}
+          onClose={() => setEditingShoppingId(null)}
+          onDelete={() => { deleteItem(editingItem.id); setEditingShoppingId(null) }}
+        />
+      )}
+    </div>
+  )
+}
+
+function ShoppingEditModal({ item, categories, onSave, onClose, onDelete }) {
+  const [name, setName] = useState(item.name || '')
+  const [amount, setAmount] = useState(item.amount ?? 1)
+  const [category, setCategory] = useState(item.category || 'Ostatní')
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+      <div className="bg-slate-800 rounded-2xl p-5 w-full max-w-sm border border-slate-600">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold text-white">Upravit položku</h3>
+          <button type="button" onClick={onDelete} className="p-2 text-slate-400 hover:text-red-400 rounded-lg">
+            <Trash2 className="w-5 h-5" />
+          </button>
+        </div>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Název"
+          className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white mb-3"
+        />
+        <input
+          type="number"
+          min="1"
+          value={amount}
+          onChange={(e) => setAmount(Number(e.target.value) || 1)}
+          className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white mb-3"
+        />
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white mb-4"
+        >
+          {categories.map((c) => (
+            <option key={c} value={c}>{c}</option>
+          ))}
+        </select>
+        <div className="flex gap-2">
+          <button type="button" onClick={onClose} className="flex-1 py-2 rounded-xl bg-slate-600 text-slate-200 font-medium">
+            Zrušit
+          </button>
+          <button
+            type="button"
+            onClick={() => onSave({ name: name.trim() || item.name, amount: Number(amount) || 1, category })}
+            className="flex-1 py-2 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600"
+          >
+            Uložit
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -546,119 +757,289 @@ function HomeSection({
   onScan,
   aiLoading,
   editingId,
+  setEditingId,
   editName,
   editAmount,
-  setEditingId,
+  editUnit,
+  editCategory,
+  editEmoji,
+  editConsumeWithinDays,
   setEditName,
   setEditAmount,
+  setEditUnit,
+  setEditCategory,
+  setEditEmoji,
+  setEditConsumeWithinDays,
   updateItem,
   moveToShopping,
-  deleteItem
+  deleteItem,
+  onOpenCookModal,
+  formatExpiry,
+  getItemEmoji,
+  CATEGORIES,
+  UNITS
 }) {
   const list = homeByLocation(selectedLocation)
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Co mám doma</h1>
+    <div className="space-y-6">
+      <h1 className="text-2xl md:text-3xl font-bold text-white flex items-center gap-2">
+        <Warehouse className="w-8 h-8 text-slate-300" />
+        Co mám doma
+      </h1>
 
-      <div className="flex gap-2 overflow-x-auto pb-1">
-        {locations.map((loc) => (
-          <button
-            key={loc}
-            onClick={() => setSelectedLocation(loc)}
-            className={`px-4 py-2 rounded-xl font-medium whitespace-nowrap transition-colors ${
-              selectedLocation === loc ? 'bg-blue-500 text-white' : 'bg-white text-gray-600 border border-gray-200'
-            }`}
-          >
-            {loc}
-          </button>
-        ))}
+      <section className="bg-slate-800 rounded-2xl p-4 border border-slate-600 shadow-sm">
+        <h2 className="text-lg font-semibold text-white mb-3">Přidat zásoby</h2>
+        <div className="space-y-1">
+          <label className="flex items-center justify-between w-full py-3 px-3 rounded-xl bg-slate-700/50 hover:bg-slate-700 text-white cursor-pointer">
+            <span className="flex items-center gap-3">
+              <Receipt className="w-5 h-5 text-slate-400" />
+              Vyfotit účtenku
+            </span>
+            <ChevronRight className="w-5 h-5 text-slate-400" />
+            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onScan} disabled={aiLoading} />
+          </label>
+          <label className="flex items-center justify-between w-full py-3 px-3 rounded-xl bg-slate-700/50 hover:bg-slate-700 text-white cursor-pointer">
+            <span className="flex items-center gap-3">
+              <Camera className="w-5 h-5 text-slate-400" />
+              Vyfotit lednici
+            </span>
+            <ChevronRight className="w-5 h-5 text-slate-400" />
+            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onScan} disabled={aiLoading} />
+          </label>
+          <label className="flex items-center justify-between w-full py-3 px-3 rounded-xl bg-slate-700/50 hover:bg-slate-700 text-white cursor-pointer">
+            <span className="flex items-center gap-3">
+              <Image className="w-5 h-5 text-slate-400" />
+              Nahrát z galerie
+            </span>
+            <ChevronRight className="w-5 h-5 text-slate-400" />
+            <input type="file" accept="image/*" className="hidden" onChange={onScan} disabled={aiLoading} />
+          </label>
+        </div>
+      </section>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex rounded-xl overflow-hidden border border-slate-600 bg-slate-800/80">
+          {locations.map((loc) => (
+            <button
+              key={loc}
+              onClick={() => setSelectedLocation(loc)}
+              className={`px-4 py-2 font-medium whitespace-nowrap transition-colors ${
+                selectedLocation === loc ? 'bg-blue-500 text-white' : 'text-slate-300 hover:bg-slate-700'
+              }`}
+            >
+              {loc}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={onOpenCookModal}
+          className="flex items-center gap-2 py-2 px-4 rounded-xl bg-slate-700 border border-slate-600 text-white font-medium hover:bg-slate-600"
+        >
+          <ChefHat className="w-5 h-5 text-slate-300" />
+          Co dnes uvařit?
+        </button>
       </div>
 
-      <label className="flex items-center justify-center gap-2 w-full py-3 rounded-2xl bg-blue-500 text-white font-medium hover:bg-blue-600 transition-colors cursor-pointer">
-        <Camera className="w-5 h-5" />
-        Skenovat lednici / nákup
-        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={onScan} disabled={aiLoading} />
-      </label>
-
-      <section className="bg-white rounded-2xl p-4 md:p-5 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">{selectedLocation}</h2>
+      <section className="bg-slate-800 rounded-2xl p-4 md:p-5 border border-slate-600 shadow-sm">
+        <h2 className="text-lg font-semibold text-white mb-3">{selectedLocation} <span className="text-slate-400 font-normal">{list.length}x</span></h2>
         {list.length === 0 ? (
-          <p className="text-gray-500 py-4">Žádné položky.</p>
+          <p className="text-slate-400 py-4">Žádné položky.</p>
         ) : (
           <ul className="space-y-2">
-            {list.map((item) => (
-              <li key={item.id} className="flex items-center gap-3 py-2 border-b border-gray-100 last:border-0">
-                {editingId === item.id ? (
-                  <>
-                    <input
-                      type="text"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      className="flex-1 px-3 py-1.5 rounded-lg border border-gray-200 text-sm"
-                    />
-                    <input
-                      type="number"
-                      min="0"
-                      value={editAmount}
-                      onChange={(e) => setEditAmount(Number(e.target.value) || 0)}
-                      className="w-20 px-2 py-1.5 rounded-lg border border-gray-200 text-sm"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => updateItem(item.id, { name: editName, amount: editAmount })}
-                      className="text-blue-600 font-medium text-sm"
-                    >
-                      Uložit
-                    </button>
-                    <button type="button" onClick={() => setEditingId(null)} className="text-gray-500 text-sm">
-                      Zrušit
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <span className="flex-1 font-medium text-gray-900">{item.name}</span>
-                    <span className="text-sm text-gray-500">{item.amount} {item.unit}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingId(item.id)
-                        setEditName(item.name || '')
-                        setEditAmount(item.amount ?? 0)
-                      }}
-                      className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
-                      title="Upravit"
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => moveToShopping(item)}
-                      className="p-2 text-green-600 hover:bg-green-50 rounded-lg"
-                      title="Přidat do nákupního seznamu"
-                    >
-                      <ShoppingCart className="w-4 h-4" />
-                    </button>
-                    <button type="button" onClick={() => deleteItem(item.id)} className="p-2 text-gray-400 hover:text-red-50 rounded-lg">
-                      <X className="w-4 h-4" />
-                    </button>
-                  </>
-                )}
-              </li>
-            ))}
+            {list.map((item) => {
+              const expiry = formatExpiry(item)
+              return (
+                <li key={item.id} className="flex items-center gap-3 py-2 border-b border-slate-600 last:border-0">
+                  <span className="text-xl shrink-0" aria-hidden>{item.emoji || getItemEmoji(item.name)}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="font-medium text-white block">{item.name}</span>
+                    <span className="text-sm text-slate-400">
+                      {item.amount} {item.unit}
+                      {expiry ? ` · do ${expiry}` : ''}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingId(item.id)
+                      setEditName(item.name || '')
+                      setEditAmount(item.amount ?? 0)
+                      setEditUnit(item.unit || 'ks')
+                      setEditCategory(item.category || 'Ostatní')
+                      setEditEmoji(item.emoji || getItemEmoji(item.name))
+                      setEditConsumeWithinDays(item.consumeWithinDays ?? 7)
+                    }}
+                    className="p-2 text-slate-400 hover:text-blue-400 rounded-lg"
+                    title="Upravit"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveToShopping(item)}
+                    className="p-2 text-slate-400 hover:text-green-400 rounded-lg"
+                    title="Přidat do nákupního seznamu"
+                  >
+                    <ShoppingCart className="w-4 h-4" />
+                  </button>
+                  <button type="button" onClick={() => deleteItem(item.id)} className="p-2 text-slate-400 hover:text-red-400 rounded-lg">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>
+
+      {editingId && (
+        <ItemEditModal
+          title={`Položka ${list.findIndex((i) => i.id === editingId) + 1}`}
+          name={editName}
+          amount={editAmount}
+          unit={editUnit}
+          category={editCategory}
+          emoji={editEmoji}
+          consumeWithinDays={editConsumeWithinDays}
+          onNameChange={setEditName}
+          onAmountChange={setEditAmount}
+          onUnitChange={setEditUnit}
+          onCategoryChange={setEditCategory}
+          onEmojiChange={setEditEmoji}
+          onConsumeWithinDaysChange={setEditConsumeWithinDays}
+          categories={CATEGORIES}
+          units={UNITS}
+          onSave={() => updateItem(editingId, {
+            name: editName,
+            amount: Number(editAmount) || 0,
+            unit: editUnit,
+            category: editCategory,
+            emoji: editEmoji,
+            consumeWithinDays: Number(editConsumeWithinDays) || 7
+          })}
+          onClose={() => setEditingId(null)}
+          onDelete={() => { deleteItem(editingId); setEditingId(null) }}
+        />
+      )}
+    </div>
+  )
+}
+
+function ItemEditModal({
+  title,
+  name,
+  amount,
+  unit,
+  category,
+  emoji,
+  consumeWithinDays,
+  onNameChange,
+  onAmountChange,
+  onUnitChange,
+  onCategoryChange,
+  onEmojiChange,
+  onConsumeWithinDaysChange,
+  categories,
+  units,
+  onSave,
+  onClose,
+  onDelete
+}) {
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-slate-800 rounded-2xl p-5 w-full max-w-sm border border-slate-600 my-8">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+            <span className="text-2xl" aria-hidden>{emoji}</span>
+            {title}
+          </h3>
+          <button type="button" onClick={onDelete} className="p-2 text-slate-400 hover:text-red-400 rounded-lg">
+            <Trash2 className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Název</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => onNameChange(e.target.value)}
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Množství</label>
+            <input
+              type="number"
+              min="0"
+              value={amount}
+              onChange={(e) => onAmountChange(Number(e.target.value) || 0)}
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Jednotka</label>
+            <select
+              value={unit}
+              onChange={(e) => onUnitChange(e.target.value)}
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
+            >
+              {units.map((u) => (
+                <option key={u} value={u}>{u}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Kategorie</label>
+            <select
+              value={category}
+              onChange={(e) => onCategoryChange(e.target.value)}
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
+            >
+              {categories.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Emoji</label>
+            <input
+              type="text"
+              value={emoji}
+              onChange={(e) => onEmojiChange(e.target.value)}
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-slate-400 mb-1">Spotřebovat za (dní)</label>
+            <input
+              type="number"
+              min="1"
+              value={consumeWithinDays}
+              onChange={(e) => onConsumeWithinDaysChange(Number(e.target.value) || 7)}
+              className="w-full px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
+            />
+          </div>
+        </div>
+        <div className="flex gap-2 mt-4">
+          <button type="button" onClick={onClose} className="flex-1 py-2 rounded-xl bg-slate-600 text-slate-200 font-medium">
+            Zrušit
+          </button>
+          <button type="button" onClick={onSave} className="flex-1 py-2 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600">
+            Uložit
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
 
 function StatsSection() {
   const data = [
-    { name: 'Potraviny', value: 1500, color: '#3b82f6' },
-    { name: 'Nápoje', value: 800, color: '#10b981' },
-    { name: 'Drogerie', value: 500, color: '#f59e0b' },
-    { name: 'Ostatní', value: 200, color: '#ef4444' }
+    { name: 'Restaurace', value: 600, color: '#60a5fa' },
+    { name: 'Sladkosti', value: 200, color: '#34d399' }
   ]
   const total = data.reduce((s, i) => s + i.value, 0)
   let cum = 0
@@ -668,20 +1049,28 @@ function StatsSection() {
     cum += p
     return `${i.color} ${start}% ${cum}%`
   }).join(', ')
+  const weekDays = ['st', 'čt', 'pá', 'so', 'ne', 'po', 'út']
+  const weekValues = [0, 0, 0, 0, 0, 0, 200]
+  const maxVal = Math.max(...weekValues, 1)
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
-      <h1 className="text-2xl md:text-3xl font-bold text-gray-900">Přehled</h1>
+    <div className="space-y-6">
+      <h1 className="text-2xl md:text-3xl font-bold text-white flex items-center gap-2">
+        <PieChart className="w-8 h-8 text-slate-300" />
+        Přehled
+      </h1>
 
-      <div className="bg-white rounded-2xl p-6 shadow-sm">
-        <p className="text-lg font-semibold text-gray-900 mb-2">
-          Odhadovaná útrata tento měsíc: <span className="text-blue-600">3 000 Kč</span>
-        </p>
-        <p className="text-sm text-gray-500 mb-6">Rozdělení podle kategorií (mockup)</p>
+      <div className="bg-slate-800 rounded-2xl p-5 border border-slate-600 shadow-sm">
+        <p className="text-base font-semibold text-white mb-1">Odhadovaná útrata tento měsíc</p>
+        <p className="text-2xl font-bold text-blue-400">800 Kč</p>
+        <p className="text-sm text-slate-400 mt-1">Ruční výdaje jsou zatím &quot;v1&quot; (jednoduché).</p>
+      </div>
 
+      <div className="bg-slate-800 rounded-2xl p-5 border border-slate-600 shadow-sm">
+        <h2 className="text-lg font-semibold text-white mb-4">Výdaje podle kategorií</h2>
         <div className="flex flex-col sm:flex-row items-center gap-6">
           <div
-            className="w-40 h-40 sm:w-48 sm:h-48 rounded-full border-4 border-white shadow-md flex-shrink-0"
+            className="w-36 h-36 rounded-full border-4 border-slate-700 shadow-md flex-shrink-0"
             style={{ background: `conic-gradient(${gradient})` }}
           />
           <div className="flex-1 w-full space-y-2">
@@ -689,12 +1078,89 @@ function StatsSection() {
               <div key={i} className="flex justify-between items-center">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
-                  <span className="text-gray-700">{d.name}</span>
+                  <span className="text-slate-300">{d.name}</span>
                 </div>
-                <span className="font-medium text-gray-900">{d.value} Kč</span>
+                <span className="font-medium text-white">{d.value} Kč</span>
               </div>
             ))}
           </div>
+        </div>
+      </div>
+
+      <div className="bg-slate-800 rounded-2xl p-5 border border-slate-600 shadow-sm">
+        <h2 className="text-lg font-semibold text-white mb-4">Týdenní trend</h2>
+        <div className="flex justify-between items-end gap-1 h-24">
+          {weekDays.map((day, i) => (
+            <div key={day} className="flex-1 flex flex-col items-center gap-1 h-full">
+              <div className="w-full flex-1 min-h-[20px] flex flex-col justify-end items-center">
+                <div
+                  className="w-6 rounded-t min-h-[4px]"
+                  style={{
+                    height: `${Math.max(4, (weekValues[i] / maxVal) * 80)}px`,
+                    backgroundColor: weekValues[i] ? '#3b82f6' : 'rgb(51 65 85)'
+                  }}
+                />
+              </div>
+              <span className="text-xs text-slate-400">{day}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CookModal({ onClose, loading, recipes, onTryAgain }) {
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-slate-800 rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto border border-slate-600 shadow-xl">
+        <div className="sticky top-0 bg-slate-800 flex justify-between items-center p-4 border-b border-slate-600">
+          <h2 className="text-xl font-bold text-white">Co dnes uvařit?</h2>
+          <button type="button" onClick={onClose} className="p-2 text-slate-400 hover:text-white rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-4 space-y-4">
+          {loading && (
+            <div className="flex flex-col items-center justify-center py-12">
+              <div className="w-10 h-10 border-2 border-blue-400 border-t-transparent rounded-full animate-spin mb-3" />
+              <p className="text-slate-300">AI vymýšlí recepty...</p>
+            </div>
+          )}
+          {!loading && recipes.length > 0 && recipes.map((r, idx) => (
+            <div key={idx} className="bg-slate-700/50 rounded-xl p-4 border border-slate-600">
+              <h3 className="text-lg font-semibold text-white mb-2">{r.title}</h3>
+              {r.description && <p className="text-sm text-slate-400 mb-3">{r.description}</p>}
+              {r.ingredients && r.ingredients.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-xs font-medium text-slate-500 mb-2">Využité suroviny</p>
+                  <div className="flex flex-wrap gap-2">
+                    {r.ingredients.map((ing, i) => (
+                      <span key={i} className="px-2 py-1 rounded-lg bg-slate-600 text-slate-300 text-sm">
+                        {ing}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {r.steps && r.steps.length > 0 && (
+                <ol className="list-decimal list-inside space-y-1 text-sm text-slate-300">
+                  {r.steps.map((step, i) => (
+                    <li key={i}>{step}</li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="sticky bottom-0 bg-slate-800 flex gap-3 p-4 border-t border-slate-600">
+          <button type="button" onClick={onClose} className="flex-1 py-3 rounded-xl bg-slate-600 text-slate-200 font-medium">
+            Zavřít
+          </button>
+          <button type="button" onClick={onTryAgain} className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 flex items-center justify-center gap-2">
+            <ChefHat className="w-5 h-5" />
+            Zkusit znovu
+          </button>
         </div>
       </div>
     </div>
@@ -703,20 +1169,20 @@ function StatsSection() {
 
 function ReviewModal({ items, categories, locations, selectedLocation, setSelectedLocation, onUpdate, onRemove, onSave, onClose }) {
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-white rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-xl">
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-xl border border-slate-600">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-bold text-gray-900">Zkontrolujte položky</h2>
-          <button type="button" onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 rounded-lg">
+          <h2 className="text-xl font-bold text-white">Zkontrolujte položky</h2>
+          <button type="button" onClick={onClose} className="p-2 text-slate-400 hover:text-white rounded-lg">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <p className="text-sm text-gray-500 mb-3">Uložit do lokace:</p>
+        <p className="text-sm text-slate-400 mb-3">Uložit do lokace:</p>
         <select
           value={selectedLocation}
           onChange={(e) => setSelectedLocation(e.target.value)}
-          className="w-full mb-4 px-4 py-2 rounded-xl border border-gray-200"
+          className="w-full mb-4 px-4 py-2 rounded-xl border border-slate-600 bg-slate-700 text-white"
         >
           {locations.map((loc) => (
             <option key={loc} value={loc}>{loc}</option>
@@ -725,25 +1191,25 @@ function ReviewModal({ items, categories, locations, selectedLocation, setSelect
 
         <ul className="space-y-3 mb-6">
           {items.map((item, idx) => (
-            <li key={idx} className="bg-gray-50 rounded-xl p-3 flex flex-wrap items-center gap-2">
+            <li key={idx} className="bg-slate-700/50 rounded-xl p-3 flex flex-wrap items-center gap-2 border border-slate-600">
               <input
                 type="text"
                 value={item.name || ''}
                 onChange={(e) => onUpdate(idx, 'name', e.target.value)}
                 placeholder="Název"
-                className="flex-1 min-w-[100px] px-3 py-1.5 rounded-lg border border-gray-200 text-sm"
+                className="flex-1 min-w-[100px] px-3 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
               />
               <input
                 type="number"
                 min="0"
                 value={item.amount ?? ''}
                 onChange={(e) => onUpdate(idx, 'amount', e.target.value)}
-                className="w-16 px-2 py-1.5 rounded-lg border border-gray-200 text-sm"
+                className="w-16 px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
               />
               <select
                 value={item.unit || 'ks'}
                 onChange={(e) => onUpdate(idx, 'unit', e.target.value)}
-                className="px-2 py-1.5 rounded-lg border border-gray-200 text-sm"
+                className="px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
               >
                 {UNITS.map((u) => (
                   <option key={u} value={u}>{u}</option>
@@ -752,13 +1218,13 @@ function ReviewModal({ items, categories, locations, selectedLocation, setSelect
               <select
                 value={item.category || 'Ostatní'}
                 onChange={(e) => onUpdate(idx, 'category', e.target.value)}
-                className="px-2 py-1.5 rounded-lg border border-gray-200 text-sm"
+                className="px-2 py-1.5 rounded-lg border border-slate-600 bg-slate-700 text-white text-sm"
               >
                 {categories.map((c) => (
                   <option key={c} value={c}>{c}</option>
                 ))}
               </select>
-              <button type="button" onClick={() => onRemove(idx)} className="text-red-500 hover:text-red-700 text-sm">
+              <button type="button" onClick={() => onRemove(idx)} className="text-red-400 hover:text-red-300 text-sm">
                 Smazat
               </button>
             </li>
@@ -766,7 +1232,7 @@ function ReviewModal({ items, categories, locations, selectedLocation, setSelect
         </ul>
 
         <div className="flex gap-3">
-          <button type="button" onClick={onClose} className="flex-1 py-3 rounded-xl bg-gray-100 text-gray-700 font-medium">
+          <button type="button" onClick={onClose} className="flex-1 py-3 rounded-xl bg-slate-600 text-slate-200 font-medium">
             Zrušit
           </button>
           <button type="button" onClick={onSave} className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600">
