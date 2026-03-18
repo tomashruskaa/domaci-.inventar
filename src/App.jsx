@@ -1225,7 +1225,7 @@ function Segment({ value, onChange }) {
 function TabBar({ tab, onTabChange }) {
   const tabs = [
     { id: 'shopping', label: 'Seznam', Icon: ShoppingBag, emoji: '🛒' },
-    { id: 'home', label: 'Doma', Icon: Warehouse, emoji: '🏠' },
+    { id: 'home', label: 'Doma2', Icon: Warehouse, emoji: '🏠' },
     { id: 'overview', label: 'Přehled', Icon: PieChart, emoji: '📊' }
   ]
   return (
